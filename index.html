@@ -279,6 +279,104 @@
       font-size: 12px;
     }
     #empty .big { font-size: 40px; line-height: 1; }
+
+    /* ── Log panel ── */
+    #log-toggle {
+      position: fixed;
+      bottom: 14px;
+      right: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 5px 10px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      z-index: 100;
+      transition: border-color .2s, color .2s;
+    }
+    #log-toggle:hover { border-color: var(--kick); color: var(--kick); }
+    #log-toggle.has-error { border-color: var(--danger); color: var(--danger); }
+
+    #log-panel {
+      position: fixed;
+      bottom: 46px;
+      right: 14px;
+      width: min(420px, calc(100vw - 28px));
+      max-height: 55vh;
+      background: #0d0d14;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: none;
+      flex-direction: column;
+      z-index: 100;
+      box-shadow: 0 8px 32px rgba(0,0,0,.6);
+    }
+    #log-panel.open { display: flex; }
+
+    #log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+    #log-header strong { color: var(--text); font-size: 12px; }
+    #log-clear {
+      background: none; border: none;
+      color: var(--muted); font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; cursor: pointer; padding: 2px 6px;
+      border-radius: 3px;
+    }
+    #log-clear:hover { color: var(--danger); }
+
+    #log-entries {
+      overflow-y: auto;
+      flex: 1;
+      padding: 8px 0;
+    }
+    #log-entries::-webkit-scrollbar { width: 3px; }
+    #log-entries::-webkit-scrollbar-thumb { background: var(--border); }
+
+    .log-entry {
+      display: grid;
+      grid-template-columns: 52px 14px 1fr;
+      gap: 0 6px;
+      padding: 3px 12px;
+      font-size: 11px;
+      line-height: 1.5;
+      border-left: 2px solid transparent;
+      word-break: break-all;
+    }
+    .log-entry:hover { background: rgba(255,255,255,.02); }
+    .log-entry.info  { border-color: var(--muted); }
+    .log-entry.ok    { border-color: var(--kick); }
+    .log-entry.warn  { border-color: #f59e0b; }
+    .log-entry.error { border-color: var(--danger); }
+
+    .log-time  { color: var(--muted); font-size: 10px; padding-top: 1px; }
+    .log-icon  { }
+    .log-msg   { color: var(--text); }
+    .log-entry.error .log-msg { color: var(--danger); }
+    .log-entry.ok    .log-msg { color: var(--kick); }
+    .log-entry.warn  .log-msg { color: #f59e0b; }
+
+    .log-detail {
+      grid-column: 3;
+      color: var(--muted);
+      font-size: 10px;
+      white-space: pre-wrap;
+      margin-top: 2px;
+      background: rgba(255,255,255,.03);
+      border-radius: 3px;
+      padding: 4px 6px;
+      max-height: 120px;
+      overflow-y: auto;
+    }
   </style>
 </head>
 <body>
@@ -313,6 +411,16 @@
   </footer>
 </div>
 
+<!-- Log panel -->
+<button id="log-toggle" onclick="toggleLog()">🪲 LOG</button>
+<div id="log-panel">
+  <div id="log-header">
+    <strong>Debug Log</strong>
+    <button id="log-clear" onclick="clearLog()">svuota</button>
+  </div>
+  <div id="log-entries"></div>
+</div>
+
 <!-- Pusher SDK (CDN, no build needed) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pusher/8.3.0/pusher.min.js"></script>
 <script>
@@ -321,10 +429,11 @@
 //  Configura "streamer" in config.json
 // ─────────────────────────────────────────────
 
-const PUSHER_KEY    = 'eb1d5f283081a78b932c';
+const PUSHER_KEY     = 'eb1d5f283081a78b932c';
 const PUSHER_CLUSTER = 'us2';
-const KICK_API      = 'https://kick.com/api/v2/channels/';
-const MAX_MESSAGES  = 200; // quanti messaggi tenere in DOM
+const KICK_API_V2    = 'https://kick.com/api/v2/channels/';
+const KICK_API_V1    = 'https://kick.com/api/v1/channels/';
+const MAX_MESSAGES   = 200;
 
 const chatEl    = document.getElementById('chat-container');
 const statusBar = document.getElementById('status-bar');
@@ -333,12 +442,70 @@ const hdrName   = document.getElementById('hdr-name');
 const hdrStatus = document.getElementById('hdr-status');
 const scrollBtn = document.getElementById('scroll-btn');
 const viewerEl  = document.getElementById('viewer-count');
-const emptyEl   = document.getElementById('empty');
+const logToggle = document.getElementById('log-toggle');
+const logPanel  = document.getElementById('log-panel');
+const logEntries= document.getElementById('log-entries');
+let   emptyEl   = document.getElementById('empty');
 
-let autoScroll  = true;
-let msgCount    = 0;
+let autoScroll = true;
+let msgCount   = 0;
+let hasLogError = false;
 
-// ── Scroll tracking ──
+// ══════════════════════════════════════════════
+//  LOG SYSTEM
+// ══════════════════════════════════════════════
+const ICONS = { info: 'ℹ️', ok: '✅', warn: '⚠️', error: '❌' };
+
+function log(level, msg, detail = null) {
+  const now = new Date();
+  const ts  = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+
+  // also output to browser console
+  const consoleFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+  consoleFn(`[KickChat][${level.toUpperCase()}] ${msg}`, detail ?? '');
+
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${level}`;
+
+  let detailHtml = '';
+  if (detail !== null && detail !== undefined) {
+    let detailStr = typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2);
+    detailHtml = `<div class="log-detail">${escHtml(detailStr)}</div>`;
+  }
+
+  entry.innerHTML = `
+    <span class="log-time">${ts}</span>
+    <span class="log-icon">${ICONS[level] || 'ℹ️'}</span>
+    <span class="log-msg">${escHtml(msg)}</span>
+    ${detailHtml}
+  `;
+
+  logEntries.appendChild(entry);
+  logEntries.scrollTop = logEntries.scrollHeight;
+
+  if (level === 'error') {
+    hasLogError = true;
+    logToggle.classList.add('has-error');
+  }
+}
+
+function toggleLog() {
+  logPanel.classList.toggle('open');
+  if (logPanel.classList.contains('open')) {
+    logToggle.classList.remove('has-error');
+    logEntries.scrollTop = logEntries.scrollHeight;
+  }
+}
+
+function clearLog() {
+  logEntries.innerHTML = '';
+  hasLogError = false;
+  logToggle.classList.remove('has-error');
+}
+
+// ══════════════════════════════════════════════
+//  SCROLL
+// ══════════════════════════════════════════════
 chatEl.addEventListener('scroll', () => {
   const atBottom = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 60;
   autoScroll = atBottom;
@@ -351,7 +518,9 @@ function scrollToBottom() {
   scrollBtn.classList.remove('visible');
 }
 
-// ── Status helpers ──
+// ══════════════════════════════════════════════
+//  STATUS BAR
+// ══════════════════════════════════════════════
 function setStatus(msg, isError = false) {
   statusBar.textContent = msg;
   statusBar.className = isError ? 'error-bar' : '';
@@ -371,44 +540,41 @@ function setOffline(slug) {
   setStatus(`Connesso alla chat di ${slug} (stream offline)`);
 }
 
-// ── Badge rendering ──
+// ══════════════════════════════════════════════
+//  CHAT RENDERING
+// ══════════════════════════════════════════════
 function renderBadges(badges) {
   if (!badges || badges.length === 0) return '';
   return badges.map(b => {
     const type = b.type || '';
     let cls = 'badge';
-    if (type === 'broadcaster')  cls += ' badge-broadcaster';
-    else if (type === 'moderator') cls += ' badge-moderator';
-    else if (type === 'subscriber') cls += ' badge-subscriber';
-    else if (type === 'og')      cls += ' badge-og';
-    else if (type === 'vip')     cls += ' badge-vip';
-    else cls += ' badge-subscriber';
+    if      (type === 'broadcaster') cls += ' badge-broadcaster';
+    else if (type === 'moderator')   cls += ' badge-moderator';
+    else if (type === 'subscriber')  cls += ' badge-subscriber';
+    else if (type === 'og')          cls += ' badge-og';
+    else if (type === 'vip')         cls += ' badge-vip';
+    else                             cls += ' badge-subscriber';
     return `<span class="${cls}">${type.substring(0,3)}</span>`;
   }).join('');
 }
 
-// ── Color from username (deterministic) ──
 function colorFromName(name) {
-  const colors = [
-    '#53fc18','#3b82f6','#f59e0b','#ec4899',
-    '#06b6d4','#8b5cf6','#f97316','#10b981',
-  ];
+  const colors = ['#53fc18','#3b82f6','#f59e0b','#ec4899','#06b6d4','#8b5cf6','#f97316','#10b981'];
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
   return colors[Math.abs(hash) % colors.length];
 }
 
-// ── Render a chat message ──
 function addMessage(data) {
-  if (emptyEl) emptyEl.remove();
+  if (emptyEl) { emptyEl.remove(); emptyEl = null; }
 
-  const sender  = data.sender  || {};
-  const content = data.content || data.message || '';
+  const sender   = data.sender || {};
+  const content  = data.content || data.message || '';
   const username = sender.username || sender.slug || '???';
-  const badges  = renderBadges(sender.identity?.badges || []);
-  const color   = sender.identity?.color || colorFromName(username);
-  const now     = new Date();
-  const time    = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+  const badges   = renderBadges(sender.identity?.badges || []);
+  const color    = sender.identity?.color || colorFromName(username);
+  const now      = new Date();
+  const time     = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
 
   const div = document.createElement('div');
   div.className = 'msg';
@@ -424,13 +590,10 @@ function addMessage(data) {
 
   chatEl.appendChild(div);
   msgCount++;
-
-  // Trim old messages
   if (msgCount > MAX_MESSAGES) {
     const first = chatEl.querySelector('.msg');
     if (first) { first.remove(); msgCount--; }
   }
-
   if (autoScroll) scrollToBottom();
 }
 
@@ -444,103 +607,187 @@ function addSystemMsg(text) {
 
 function escHtml(str) {
   return String(str)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Main: carica config → ottieni channel info → connetti WebSocket ──
+// ══════════════════════════════════════════════
+//  MAIN INIT
+// ══════════════════════════════════════════════
 async function init() {
-  // 1. Leggi config.json
+  log('info', 'Avvio Kick Chat Viewer');
+  log('info', 'User Agent: ' + navigator.userAgent);
+  log('info', 'URL pagina: ' + location.href);
+
+  // ── STEP 1: leggi config.json ──
+  log('info', 'STEP 1 — Lettura config.json');
   let config;
   try {
-    const res = await fetch('./config.json?_=' + Date.now());
-    config = await res.json();
+    const url = './config.json?_=' + Date.now();
+    log('info', 'Fetch: ' + url);
+    const res = await fetch(url);
+    log('info', `Risposta HTTP: ${res.status} ${res.statusText}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    log('info', 'Testo grezzo ricevuto', text);
+    config = JSON.parse(text);
+    log('ok', 'config.json letto correttamente', config);
   } catch (e) {
+    log('error', 'Impossibile leggere config.json', e.message);
     setStatus('Errore: impossibile leggere config.json', true);
     return;
   }
 
   const streamer = (config.streamer || '').trim().toLowerCase();
   if (!streamer) {
+    log('error', 'Campo "streamer" mancante o vuoto in config.json');
     setStatus('Errore: campo "streamer" mancante in config.json', true);
     return;
   }
-
+  log('ok', `Streamer da cercare: "${streamer}"`);
   hdrName.textContent = streamer;
   setStatus(`Recupero info canale per "${streamer}"…`);
 
-  // 2. Chiama API Kick per ottenere il chatroom_id
-  let chatroomId;
+  // ── STEP 2: API Kick v2 ──
+  log('info', `STEP 2 — Chiamata API v2: ${KICK_API_V2}${streamer}`);
+  let chatroomId = null;
+
   try {
-    const res = await fetch(KICK_API + streamer, {
+    const res = await fetch(KICK_API_V2 + streamer, {
       headers: { 'Accept': 'application/json' }
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    log('info', `API v2 risposta HTTP: ${res.status} ${res.statusText}`);
+
+    const responseText = await res.text();
+    log('info', 'API v2 risposta grezza (primi 500 char)', responseText.substring(0, 500));
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${responseText.substring(0,200)}`);
+
+    const data = JSON.parse(responseText);
+    log('ok', 'API v2 JSON parsato', {
+      id: data.id,
+      slug: data.slug,
+      chatroom_id: data.chatroom?.id,
+      is_live: data.livestream != null,
+      viewer_count: data.livestream?.viewer_count ?? null,
+    });
 
     chatroomId = data.chatroom?.id;
-    const isLive = data.livestream != null;
+    const isLive  = data.livestream != null;
     const viewers = data.livestream?.viewer_count;
 
     if (isLive) {
       setConnected(streamer);
+      log('ok', `Stream LIVE — spettatori: ${viewers}`);
       if (viewers != null) {
         viewerEl.textContent = `👁 ${viewers.toLocaleString('it')}`;
         viewerEl.classList.add('visible');
       }
     } else {
       setOffline(streamer);
+      log('warn', 'Stream offline, ma la chat è disponibile');
     }
   } catch (e) {
-    // Prova endpoint v1 come fallback
+    log('warn', 'API v2 fallita, provo v1', e.message);
+
+    // ── STEP 2b: fallback API v1 ──
     try {
-      const res = await fetch(`https://kick.com/api/v1/channels/${streamer}`);
-      const data = await res.json();
+      log('info', `STEP 2b — Chiamata API v1: ${KICK_API_V1}${streamer}`);
+      const res = await fetch(KICK_API_V1 + streamer);
+      log('info', `API v1 risposta HTTP: ${res.status} ${res.statusText}`);
+
+      const responseText = await res.text();
+      log('info', 'API v1 risposta grezza (primi 500 char)', responseText.substring(0, 500));
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = JSON.parse(responseText);
       chatroomId = data.chatroom?.id;
+
+      log('ok', 'API v1 OK', { chatroom_id: chatroomId });
       setOffline(streamer);
-    } catch {
-      setStatus(`Errore: canale "${streamer}" non trovato su Kick`, true);
+    } catch (e2) {
+      log('error', `Canale "${streamer}" non trovato su Kick (entrambe le API fallite)`, e2.message);
+      setStatus(`Errore: canale "${streamer}" non trovato`, true);
       dot.className = 'status-dot error';
       return;
     }
   }
 
   if (!chatroomId) {
+    log('error', 'chatroom.id è null/undefined nella risposta API — struttura JSON inattesa');
     setStatus('Errore: chatroom ID non trovato', true);
     return;
   }
 
-  // 3. Connetti Pusher WebSocket
+  log('ok', `Chatroom ID ottenuto: ${chatroomId}`);
+
+  // ── STEP 3: Pusher WebSocket ──
+  log('info', `STEP 3 — Connessione Pusher (key: ${PUSHER_KEY}, cluster: ${PUSHER_CLUSTER})`);
+  log('info', `Canale Pusher: chatrooms.${chatroomId}.v2`);
   setStatus(`Connessione WebSocket (chatroom #${chatroomId})…`);
 
-  const pusher = new Pusher(PUSHER_KEY, {
-    cluster: PUSHER_CLUSTER,
-    forceTLS: true,
-  });
+  let pusher;
+  try {
+    pusher = new Pusher(PUSHER_KEY, {
+      cluster: PUSHER_CLUSTER,
+      forceTLS: true,
+    });
+    log('ok', 'Pusher istanziato');
+  } catch(e) {
+    log('error', 'Errore creazione Pusher', e.message);
+    setStatus('Errore Pusher: ' + e.message, true);
+    return;
+  }
 
-  const channel = pusher.subscribe(`chatrooms.${chatroomId}.v2`);
-
-  channel.bind('App\\Events\\ChatMessageSent', (data) => {
-    addMessage(data);
-  });
-
-  pusher.connection.bind('connected', () => {
+  pusher.connection.bind('connecting', ()  => log('info', 'Pusher: connecting…'));
+  pusher.connection.bind('connected',  ()  => {
+    log('ok', 'Pusher: connesso! Socket ID: ' + pusher.connection.socket_id);
     addSystemMsg('✓ Connesso alla chat');
   });
-
   pusher.connection.bind('disconnected', () => {
+    log('warn', 'Pusher: disconnesso');
     dot.className = 'status-dot';
     hdrStatus.textContent = 'disconnesso';
     setStatus('Disconnesso — riconnessione…', true);
     addSystemMsg('⚠ Disconnesso dalla chat, riconnessione…');
   });
-
+  pusher.connection.bind('failed', () => {
+    log('error', 'Pusher: connessione fallita (WebSocket non supportato o bloccato?)');
+    setStatus('Errore: connessione WebSocket fallita', true);
+  });
   pusher.connection.bind('error', (err) => {
-    setStatus('Errore WebSocket: ' + (err?.message || err), true);
+    log('error', 'Pusher connection error', JSON.stringify(err));
+    setStatus('Errore WebSocket', true);
     dot.className = 'status-dot error';
   });
+
+  const channel = pusher.subscribe(`chatrooms.${chatroomId}.v2`);
+  log('info', 'Pusher: iscritto al canale, in attesa di messaggi…');
+
+  channel.bind('pusher:subscription_succeeded', () => {
+    log('ok', 'Pusher: subscription_succeeded — iscrizione confermata');
+  });
+  channel.bind('pusher:subscription_error', (err) => {
+    log('error', 'Pusher: subscription_error', JSON.stringify(err));
+  });
+
+  channel.bind('App\\Events\\ChatMessageSent', (data) => {
+    log('info', `Messaggio ricevuto da: ${data?.sender?.username}`, {
+      content: data?.content,
+      chatroom_id: data?.chatroom_id,
+      sender_id: data?.sender?.id,
+    });
+    addMessage(data);
+  });
+
+  // Ascolta TUTTI gli eventi per debug
+  channel.bind_global((eventName, data) => {
+    if (eventName !== 'App\\Events\\ChatMessageSent') {
+      log('info', `Evento Pusher: ${eventName}`, typeof data === 'object' ? JSON.stringify(data).substring(0,200) : data);
+    }
+  });
+
+  log('ok', 'Init completato — in ascolto per messaggi');
 }
 
 init();
