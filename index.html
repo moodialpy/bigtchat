@@ -430,7 +430,7 @@
 // ─────────────────────────────────────────────
 
 const PUSHER_KEY     = 'eb1d5f283081a78b932c';
-const PUSHER_CLUSTER = 'us2';
+const PUSHER_HOST    = 'ws-us2.pusher.com';
 const KICK_API_V2    = 'https://kick.com/api/v2/channels/';
 const KICK_API_V1    = 'https://kick.com/api/v1/channels/';
 const MAX_MESSAGES   = 200;
@@ -722,17 +722,21 @@ async function init() {
   log('ok', `Chatroom ID ottenuto: ${chatroomId}`);
 
   // ── STEP 3: Pusher WebSocket ──
-  log('info', `STEP 3 — Connessione Pusher (key: ${PUSHER_KEY}, cluster: ${PUSHER_CLUSTER})`);
+  log('info', `STEP 3 — Connessione Pusher (key: ${PUSHER_KEY}, host: ${PUSHER_HOST})`);
   log('info', `Canale Pusher: chatrooms.${chatroomId}.v2`);
   setStatus(`Connessione WebSocket (chatroom #${chatroomId})…`);
 
   let pusher;
   try {
     pusher = new Pusher(PUSHER_KEY, {
-      cluster: PUSHER_CLUSTER,
+      wsHost: 'ws-us2.pusher.com',
+      wsPort: 443,
+      wssPort: 443,
       forceTLS: true,
+      enabledTransports: ['ws', 'wss'],
+      disableStats: true,
     });
-    log('ok', 'Pusher istanziato');
+    log('ok', 'Pusher istanziato (wsHost: ws-us2.pusher.com)');
   } catch(e) {
     log('error', 'Errore creazione Pusher', e.message);
     setStatus('Errore Pusher: ' + e.message, true);
