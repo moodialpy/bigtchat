@@ -421,16 +421,15 @@
   <div id="log-entries"></div>
 </div>
 
-<!-- Pusher SDK (CDN, no build needed) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pusher/8.3.0/pusher.min.js"></script>
+<!-- Nessuna dipendenza esterna: WebSocket nativo -->
 <script>
 // ─────────────────────────────────────────────
 //  Kick Chat Viewer — GitHub Pages ready
 //  Configura "streamer" in config.json
 // ─────────────────────────────────────────────
 
-const PUSHER_KEY     = 'eb1d5f283081a78b932c';
-const PUSHER_HOST    = 'ws-us2.pusher.com';
+const PUSHER_KEY  = 'eb1d5f283081a78b932c';
+const PUSHER_HOST = 'wss://ws-us2.pusher.com';
 const KICK_API_V2    = 'https://kick.com/api/v2/channels/';
 const KICK_API_V1    = 'https://kick.com/api/v1/channels/';
 const MAX_MESSAGES   = 200;
@@ -722,76 +721,99 @@ async function init() {
   log('ok', `Chatroom ID ottenuto: ${chatroomId}`);
 
   // ── STEP 3: Pusher WebSocket ──
-  log('info', `STEP 3 — Connessione Pusher (key: ${PUSHER_KEY}, host: ${PUSHER_HOST})`);
-  log('info', `Canale Pusher: chatrooms.${chatroomId}.v2`);
+  // ── STEP 3: WebSocket nativo (protocollo Pusher manuale) ──
+  const wsUrl = `${PUSHER_HOST}/app/${PUSHER_KEY}?protocol=7&client=js&version=7.6.0&flash=false`;
+  log('info', `STEP 3 — Connessione WebSocket nativo`);
+  log('info', `URL: ${wsUrl}`);
   setStatus(`Connessione WebSocket (chatroom #${chatroomId})…`);
 
-  let pusher;
-  try {
-    pusher = new Pusher(PUSHER_KEY, {
-      wsHost: 'ws-us2.pusher.com',
-      wsPort: 443,
-      wssPort: 443,
-      forceTLS: true,
-      enabledTransports: ['ws', 'wss'],
-      disableStats: true,
-    });
-    log('ok', 'Pusher istanziato (wsHost: ws-us2.pusher.com)');
-  } catch(e) {
-    log('error', 'Errore creazione Pusher', e.message);
-    setStatus('Errore Pusher: ' + e.message, true);
-    return;
+  let ws;
+  let pingInterval;
+
+  function connectWS() {
+    try {
+      ws = new WebSocket(wsUrl);
+      log('ok', 'WebSocket creato');
+    } catch(e) {
+      log('error', 'Impossibile creare WebSocket', e.message);
+      setStatus('Errore: WebSocket non supportato', true);
+      return;
+    }
+
+    ws.onopen = () => {
+      log('ok', 'WebSocket aperto — invio subscribe');
+
+      // Sottoscrivi al canale chat
+      const subMsg = JSON.stringify({
+        event: 'pusher:subscribe',
+        data: { auth: '', channel: `chatrooms.${chatroomId}.v2` }
+      });
+      ws.send(subMsg);
+      log('info', 'Subscribe inviato', subMsg);
+
+      // Ping ogni 30s per mantenere la connessione viva
+      pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ event: 'pusher:ping', data: {} }));
+          log('info', 'Ping inviato');
+        }
+      }, 30000);
+    };
+
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+
+      const evName = msg.event || '';
+      log('info', `WS evento: ${evName}`, evName !== 'App\\Events\\ChatMessageSent' ? JSON.stringify(msg).substring(0,200) : `sender: ${JSON.parse(msg.data||'{}').sender?.username}`);
+
+      if (evName === 'pusher:connection_established') {
+        log('ok', 'Pusher: connection_established');
+        dot.className = 'status-dot live';
+        hdrStatus.textContent = 'LIVE';
+        setStatus(`Connesso alla chat di ${streamer}`);
+        addSystemMsg('✓ Connesso alla chat');
+        return;
+      }
+
+      if (evName === 'pusher_internal:subscription_succeeded') {
+        log('ok', 'Pusher: subscription_succeeded — ricezione messaggi attiva');
+        return;
+      }
+
+      if (evName === 'pusher:error') {
+        log('error', 'Pusher error dal server', JSON.stringify(msg));
+        return;
+      }
+
+      if (evName === 'App\\Events\\ChatMessageSent') {
+        let data;
+        try { data = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data; }
+        catch(e) { log('warn', 'Impossibile parsare msg.data', e.message); return; }
+        addMessage(data);
+        return;
+      }
+    };
+
+    ws.onerror = (err) => {
+      log('error', 'WebSocket onerror', err.message || 'nessun dettaglio disponibile');
+      setStatus('Errore WebSocket', true);
+      dot.className = 'status-dot error';
+    };
+
+    ws.onclose = (event) => {
+      clearInterval(pingInterval);
+      log('warn', `WebSocket chiuso — code: ${event.code}, reason: "${event.reason}", wasClean: ${event.wasClean}`);
+      dot.className = 'status-dot';
+      hdrStatus.textContent = 'disconnesso';
+      setStatus('Disconnesso — riconnessione in 3s…', true);
+      addSystemMsg('⚠ Disconnesso, riconnessione…');
+      setTimeout(connectWS, 3000);
+    };
   }
 
-  pusher.connection.bind('connecting', ()  => log('info', 'Pusher: connecting…'));
-  pusher.connection.bind('connected',  ()  => {
-    log('ok', 'Pusher: connesso! Socket ID: ' + pusher.connection.socket_id);
-    addSystemMsg('✓ Connesso alla chat');
-  });
-  pusher.connection.bind('disconnected', () => {
-    log('warn', 'Pusher: disconnesso');
-    dot.className = 'status-dot';
-    hdrStatus.textContent = 'disconnesso';
-    setStatus('Disconnesso — riconnessione…', true);
-    addSystemMsg('⚠ Disconnesso dalla chat, riconnessione…');
-  });
-  pusher.connection.bind('failed', () => {
-    log('error', 'Pusher: connessione fallita (WebSocket non supportato o bloccato?)');
-    setStatus('Errore: connessione WebSocket fallita', true);
-  });
-  pusher.connection.bind('error', (err) => {
-    log('error', 'Pusher connection error', JSON.stringify(err));
-    setStatus('Errore WebSocket', true);
-    dot.className = 'status-dot error';
-  });
-
-  const channel = pusher.subscribe(`chatrooms.${chatroomId}.v2`);
-  log('info', 'Pusher: iscritto al canale, in attesa di messaggi…');
-
-  channel.bind('pusher:subscription_succeeded', () => {
-    log('ok', 'Pusher: subscription_succeeded — iscrizione confermata');
-  });
-  channel.bind('pusher:subscription_error', (err) => {
-    log('error', 'Pusher: subscription_error', JSON.stringify(err));
-  });
-
-  channel.bind('App\\Events\\ChatMessageSent', (data) => {
-    log('info', `Messaggio ricevuto da: ${data?.sender?.username}`, {
-      content: data?.content,
-      chatroom_id: data?.chatroom_id,
-      sender_id: data?.sender?.id,
-    });
-    addMessage(data);
-  });
-
-  // Ascolta TUTTI gli eventi per debug
-  channel.bind_global((eventName, data) => {
-    if (eventName !== 'App\\Events\\ChatMessageSent') {
-      log('info', `Evento Pusher: ${eventName}`, typeof data === 'object' ? JSON.stringify(data).substring(0,200) : data);
-    }
-  });
-
-  log('ok', 'Init completato — in ascolto per messaggi');
+  connectWS();
+  log('ok', 'Init completato — WebSocket in corso');
 }
 
 init();
